@@ -15,18 +15,20 @@ login() { # jar email password
   curl -s -b "$1" -c "$1" -o /dev/null -d "action=login&csrf_token=$t" --data-urlencode "email=$2" --data-urlencode "password=$3" "$BASE/"
 }
 api() { curl -s -o "$T/body" -w '%{http_code}' "$@"; }
+IN='value="logout"'   # the Sign out button only appears when signed in
 
 # --- Login and session
 token "$T/a" >/dev/null; before=$(sid "$T/a")
 login "$T/a" alex@example.test "$ALEX_PW"
-check "T01 valid login shows Alex's account" "curl -s -b $T/a $BASE/ | grep -q 'User ID: 1 '"
+check "T01 valid login shows Alex's account" "curl -s -b $T/a $BASE/ | grep -q 'class=\"who\">alex@example.test<'"
 check "T02 session ID changes on login (no fixation)" "[ -n \"$before\" ] && [ \"$before\" != \"\$(sid $T/a)\" ]"
 check "T03 cookie is HttpOnly" "grep -q '^#HttpOnly_' $T/a"
 login "$T/x" alex@example.test wrong-password
 curl -s -b "$T/x" "$BASE/" > "$T/xpage"
-check "T04 invalid login is rejected with generic message" "grep -q 'Invalid email or password' $T/xpage && ! grep -q 'User ID:' $T/xpage"
+check "T04 invalid login is rejected with generic message (email not echoed)" "grep -q 'Email or password is incorrect' $T/xpage && ! grep -q '$IN' $T/xpage && ! grep -q 'alex@example.test' $T/xpage"
 login "$T/s" "alex@example.test' -- " wrong
-check "T05 SQL injection login payload is rejected" "! curl -s -b $T/s $BASE/ | grep -q 'User ID:'"
+TS=$(token "$T/s")
+check "T05 SQL injection payload and array-typed email[] are rejected safely (no 500)" "! curl -s -b $T/s $BASE/ | grep -q '$IN' && [ \$(curl -s -b $T/s -o /dev/null -w '%{http_code}' -d 'action=login&csrf_token=$TS&email[]=x&password[]=y' $BASE/) = 302 ]"
 
 # --- Authorization between two users
 login "$T/b" sam@example.test "$SAM_PW"
@@ -40,9 +42,9 @@ check "T10 Sam's notes 3 and 4 still exist and are unchanged" "curl -s -b $T/b $
 
 # --- CSRF and unsafe methods
 check "T11 POST without CSRF token is rejected (403)" "[ \$(curl -s -b $T/a -o /dev/null -w '%{http_code}' -d 'action=save&title=x&body=x' $BASE/) = 403 ]"
-check "T12 POST with cross-site Origin is rejected (403)" "[ \$(curl -s -b $T/a -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example' -d 'action=save&title=x&body=x&csrf_token=$TA' $BASE/) = 403 ]"
+check "T12 POST with cross-site Origin is rejected (403); same-site Origin is accepted" "[ \$(curl -s -b $T/a -o /dev/null -w '%{http_code}' -H 'Origin: https://evil.example' -d 'action=save&title=x&body=x&csrf_token=$TA' $BASE/) = 403 ] && [ \$(curl -s -b $T/a -o /dev/null -w '%{http_code}' -H 'Origin: $BASE' -d 'action=save&title=Origin+check&body=ok&csrf_token=$TA' $BASE/) = 302 ]"
 curl -s -b "$T/a" -o /dev/null "$BASE/?logout=1"
-check "T13 GET ?logout=1 no longer changes state" "curl -s -b $T/a $BASE/ | grep -q 'User ID: 1 '"
+check "T13 GET ?logout=1 no longer changes state" "curl -s -b $T/a $BASE/ | grep -q '$IN'"
 
 # --- Client-controlled owner / role, XSS
 curl -s -b "$T/a" -o /dev/null -d "action=save&user_id=2&csrf_token=$TA" --data-urlencode 'title=<script>alert(1)</script>' --data-urlencode 'body=<img src=x onerror=alert(2)>' "$BASE/"
@@ -51,7 +53,7 @@ check "T15 HTML-like note text is escaped in the page" "curl -s -b $T/a $BASE/ |
 TN=$(token "$T/n"); E="eve$RANDOM@example.test"
 curl -s -b "$T/n" -c "$T/n" -o /dev/null -d "action=register&role=admin&csrf_token=$TN&password=$SAM_PW" --data-urlencode "email=$E" "$BASE/"
 login "$T/n" "$E" "$SAM_PW"
-check "T16 registering with role=admin still creates a student" "curl -s -b $T/n $BASE/ | grep -q 'Role: student'"
+check "T16 registering with role=admin still creates a student" "curl -s -b $T/n $BASE/ | grep -q 'class=\"role\">student<'"
 
 # --- API
 check "T17 API with no session returns 401" "[ \$(api $BASE/api.php?user_id=1) = 401 ]"
@@ -64,15 +66,15 @@ check "T22 API JSON array / missing fields return 400" "[ \$(api \"\${H[@]}\" -d
 check "T23 API wrong Content-Type returns 415" "[ \$(api -b $T/a -H 'X-CSRF-Token: $TA' -d 'id=1' $BASE/api.php) = 415 ]"
 check "T24 API update of Sam's note 3 returns 404" "[ \$(api \"\${H[@]}\" -d '{\"id\":3,\"title\":\"hacked\",\"body\":\"hacked\"}' $BASE/api.php) = 404 ]"
 check "T25 API update of own note 1 returns 200" "[ \$(api \"\${H[@]}\" -d '{\"id\":1,\"title\":\"Alex: course reminder\",\"body\":\"Updated via API.\"}' $BASE/api.php) = 200 ]"
-check "T26 API untrusted Origin: 403 and no CORS allow headers" "[ \$(api -b $T/a -H 'Origin: https://evil.example' $BASE/api.php) = 403 ] && ! curl -s -D - -o /dev/null -b $T/a -H 'Origin: https://evil.example' $BASE/api.php | grep -qi access-control-allow"
-check "T27 API OPTIONS/PUT return 405" "[ \$(api -b $T/a -X PUT $BASE/api.php) = 405 ]"
-check "T28 direct request to templates/home.php returns 404" "[ \$(api $BASE/templates/home.php) = 404 ]"
+check "T26 API untrusted Origin: GET and POST get 403, no CORS allow headers" "[ \$(api -b $T/a -H 'Origin: https://evil.example' $BASE/api.php) = 403 ] && [ \$(api \"\${H[@]}\" -H 'Origin: https://evil.example' -d '{\"id\":1,\"title\":\"x\",\"body\":\"x\"}' $BASE/api.php) = 403 ] && ! curl -s -D - -o /dev/null -b $T/a -H 'Origin: https://evil.example' $BASE/api.php | grep -qi access-control-allow"
+check "T27 API OPTIONS/PUT return 405" "[ \$(api -b $T/a -X PUT $BASE/api.php) = 405 ] && [ \$(api -b $T/a -X OPTIONS $BASE/api.php) = 405 ]"
+check "T28 private files (templates/home.php, schema.sql, .git/config) return 404" "[ \$(api $BASE/templates/home.php) = 404 ] && [ \$(api $BASE/schema.sql) = 404 ] && [ \$(api $BASE/.git/config) = 404 ]"
 
 # --- Logout
 cp "$T/a" "$T/old"
 TA=$(token "$T/a")
 curl -s -b "$T/a" -c "$T/a" -o /dev/null -d "action=logout&csrf_token=$TA" "$BASE/"
-check "T29 after logout, page shows sign-in form" "curl -s -b $T/a $BASE/ | grep -q 'Register or sign in'"
+check "T29 after logout, page shows sign-in form" "curl -s -b $T/a $BASE/ | grep -q 'value=\"login\"' && ! curl -s -b $T/a $BASE/ | grep -q '$IN'"
 check "T30 after logout, old session cookie gets 401 from API" "[ \$(api -b $T/old $BASE/api.php) = 401 ]"
 check "T31 Sam's session is unaffected by Alex's logout" "[ \$(api -b $T/b $BASE/api.php) = 200 ]"
 

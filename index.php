@@ -2,13 +2,20 @@
 require __DIR__ . '/lib/bootstrap.php';
 require __DIR__ . '/lib/notes.php';
 
-header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
+// Only our own CSS/JS files are allowed. No inline scripts or styles.
+header("Content-Security-Policy: default-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+
+// Read a text field from the form. Anything that is not a plain string (like email[]=x) becomes ''.
+function post_text($name)
+{
+    return is_string($_POST[$name] ?? null) ? $_POST[$name] : '';
+}
 
 // Save a message in the session and go back to the home page.
-function go_home($message = '')
+function go_home($message = '', $isError = false)
 {
     if ($message !== '') {
-        $_SESSION['flash'] = $message;
+        $_SESSION['flash'] = ['text' => $message, 'error' => $isError];
     }
     header('Location: /');
     exit;
@@ -20,24 +27,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         fail(403, 'Invalid or missing security token. Reload the page and try again.');
     }
 
-    $action = $_POST['action'] ?? '';
-    $email = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
+    $action = post_text('action');
+    $email = trim(post_text('email'));
+    $password = post_text('password');
 
     if ($action === 'register') {
         if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < PASSWORD_MIN) {
-            go_home('Enter a valid email and a password of at least ' . PASSWORD_MIN . ' characters.');
+            go_home('Enter a valid email and a password with at least ' . PASSWORD_MIN . ' characters.', true);
         }
         if (!create_user($email, $password)) {
-            go_home('That email cannot be registered.');
+            go_home('That email can’t be used for a new account.', true);
         }
-        go_home('Account created. You can sign in now.');
+        go_home('Account created. Sign in with your new password.');
     }
 
     if ($action === 'login') {
         $user = verify_login($email, $password);
         if (!$user) {
-            go_home('Invalid email or password.'); // same message for wrong email or wrong password
+            go_home('Email or password is incorrect.', true); // same message for wrong email or wrong password
         }
         log_in($user);
         go_home();
@@ -54,14 +61,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         fail(401, 'Please sign in first.');
     }
 
-    $id = parse_id($_POST['id'] ?? '');
-    $title = $_POST['title'] ?? '';
-    $body = $_POST['body'] ?? '';
+    $id = parse_id(post_text('id'));
+    $title = post_text('title');
+    $body = post_text('body');
 
     if ($action === 'save') {
         $error = note_error($title, $body);
         if ($error) {
-            go_home($error);
+            go_home($error, true);
         }
         create_note($userId, $title, $body); // owner comes from the session, not the form
         go_home('Note saved.');
@@ -70,12 +77,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'update') {
         $error = note_error($title, $body);
         if ($error) {
-            go_home($error);
+            go_home($error, true);
         }
         if (!$id || !update_note($id, $userId, $title, $body)) {
             fail(404, 'Note not found.');
         }
-        go_home('Note updated.');
+        go_home('Changes saved.');
     }
 
     if ($action === 'delete') {
@@ -89,7 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // GET: show the page.
-$message = $_SESSION['flash'] ?? '';
+$flash = $_SESSION['flash'] ?? null;
 unset($_SESSION['flash']);
 
 $userId = current_user_id();

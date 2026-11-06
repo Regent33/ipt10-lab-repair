@@ -104,6 +104,7 @@ function log_in($user)
 {
     session_regenerate_id(true); // new session ID after login (prevents session fixation)
     $_SESSION['user_id'] = (int) $user['id'];
+    $_SESSION['email'] = $user['email'];
     $_SESSION['role'] = $user['role'];
     unset($_SESSION['csrf_token']); // new token for the logged-in session
 }
