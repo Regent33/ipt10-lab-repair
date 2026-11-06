@@ -16,10 +16,11 @@ CREATE TABLE notes (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
--- Synthetic accounts for local use only. The starter login expects MD5.
+-- Synthetic accounts for local use only (same throwaway passwords as the README).
+-- Hashes are bcrypt from PHP password_hash(..., PASSWORD_DEFAULT); login uses password_verify().
 INSERT INTO users (id, email, password_hash, role) VALUES
-  (1, 'alex@example.test', MD5('LabOnly-Alex-123'), 'student'),
-  (2, 'sam@example.test', MD5('LabOnly-Sam-456'), 'student');
+  (1, 'alex@example.test', '$2y$10$XfDuh5nSrhyxg2W1kiiU7.oDOBhdLSPGLefzgvwQCZdUKdzi/P1IG', 'student'),
+  (2, 'sam@example.test', '$2y$10$MlAiWCZ.9QXCwK54Vm2Ro.VKgFLjy1LBkV7r87.2PNN93fqk3MUHm', 'student');
 
 INSERT INTO notes (user_id, title, body) VALUES
   (1, 'Alex: course reminder', 'Review the security reading before class.'),

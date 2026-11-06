@@ -1,128 +1,109 @@
 <?php
-session_start();
-ini_set('display_errors', '1');
-error_reporting(E_ALL);
+require __DIR__ . '/lib/bootstrap.php';
+require __DIR__ . '/lib/notes.php';
 
-$db = new PDO(
-    'mysql:host=localhost;dbname=notes_lab;charset=utf8mb4',
-    getenv('LAB_DB_USER') ?: 'root',
-    getenv('LAB_DB_PASSWORD') ?: ''
-);
-$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-$db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
 
-$action = $_POST['action'] ?? '';
-if ($action === 'register') {
-    $email = $_POST['email'];
-    $hash = md5($_POST['password']);
-    $role = $_POST['role'];
-    $stmt = $db->prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)');
-    $stmt->execute([$email, $hash, $role]);
-    header('Location: /?message=Account created');
-    exit;
-}
-
-if ($action === 'login') {
-    $email = $_POST['email'];
-    $hash = md5($_POST['password']);
-    $sql = "SELECT * FROM users WHERE email = '$email' AND password_hash = '$hash'";
-    $user = $db->query($sql)->fetch();
-    if ($user) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['role'] = $user['role'];
-        header('Location: /');
-        exit;
+// Save a message in the session and go back to the home page.
+function go_home($message = '')
+{
+    if ($message !== '') {
+        $_SESSION['flash'] = $message;
     }
-    $message = 'Login failed for ' . $email;
-}
-
-if ($action === 'save') {
-    $owner = $_POST['user_id'];
-    $title = $_POST['title'];
-    $body = $_POST['body'];
-    $sql = "INSERT INTO notes (user_id, title, body) VALUES ('$owner', '$title', '$body')";
-    $db->exec($sql);
     header('Location: /');
     exit;
 }
 
-if ($action === 'update') {
-    $id = $_POST['id'];
-    $title = $_POST['title'];
-    $body = $_POST['body'];
-    $stmt = $db->prepare('UPDATE notes SET title = ?, body = ? WHERE id = ?');
-    $stmt->execute([$title, $body, $id]);
-    header('Location: /');
-    exit;
+// Every action that changes data must be a POST with a valid CSRF token.
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!same_origin() || !csrf_valid($_POST['csrf_token'] ?? null)) {
+        fail(403, 'Invalid or missing security token. Reload the page and try again.');
+    }
+
+    $action = $_POST['action'] ?? '';
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+
+    if ($action === 'register') {
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < PASSWORD_MIN) {
+            go_home('Enter a valid email and a password of at least ' . PASSWORD_MIN . ' characters.');
+        }
+        if (!create_user($email, $password)) {
+            go_home('That email cannot be registered.');
+        }
+        go_home('Account created. You can sign in now.');
+    }
+
+    if ($action === 'login') {
+        $user = verify_login($email, $password);
+        if (!$user) {
+            go_home('Invalid email or password.'); // same message for wrong email or wrong password
+        }
+        log_in($user);
+        go_home();
+    }
+
+    if ($action === 'logout') {
+        log_out();
+        go_home();
+    }
+
+    // The actions below need a logged-in user.
+    $userId = current_user_id();
+    if ($userId === null) {
+        fail(401, 'Please sign in first.');
+    }
+
+    $id = parse_id($_POST['id'] ?? '');
+    $title = $_POST['title'] ?? '';
+    $body = $_POST['body'] ?? '';
+
+    if ($action === 'save') {
+        $error = note_error($title, $body);
+        if ($error) {
+            go_home($error);
+        }
+        create_note($userId, $title, $body); // owner comes from the session, not the form
+        go_home('Note saved.');
+    }
+
+    if ($action === 'update') {
+        $error = note_error($title, $body);
+        if ($error) {
+            go_home($error);
+        }
+        if (!$id || !update_note($id, $userId, $title, $body)) {
+            fail(404, 'Note not found.');
+        }
+        go_home('Note updated.');
+    }
+
+    if ($action === 'delete') {
+        if (!$id || !delete_note($id, $userId)) {
+            fail(404, 'Note not found.');
+        }
+        go_home('Note deleted.');
+    }
+
+    fail(400, 'Unknown action.');
 }
 
-if (isset($_GET['delete'])) {
-    $stmt = $db->prepare('DELETE FROM notes WHERE id = ?');
-    $stmt->execute([$_GET['delete']]);
-    header('Location: /');
-    exit;
-}
+// GET: show the page.
+$message = $_SESSION['flash'] ?? '';
+unset($_SESSION['flash']);
 
-if (isset($_GET['logout'])) {
-    unset($_SESSION['user_id']);
-    header('Location: /');
-    exit;
-}
-
-$message = $message ?? ($_GET['message'] ?? '');
+$userId = current_user_id();
 $notes = [];
-$editing = false;
-if (isset($_SESSION['user_id'])) {
-    $notes = $db->query('SELECT id, user_id, title, body FROM notes ORDER BY id DESC')->fetchAll();
+$editing = null;
+if ($userId !== null) {
+    $notes = notes_for_owner($userId);
     if (isset($_GET['edit'])) {
-        $stmt = $db->prepare('SELECT id, title, body FROM notes WHERE id = ?');
-        $stmt->execute([$_GET['edit']]);
-        $editing = $stmt->fetch();
+        $editId = parse_id($_GET['edit']);
+        $editing = $editId ? find_note($editId, $userId) : null;
+        if (!$editing) {
+            fail(404, 'Note not found.');
+        }
     }
 }
-?>
-<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Campus Notes</title>
-<style>body{font:16px sans-serif;max-width:750px;margin:2rem auto}label{display:block;margin:.5rem 0}article{border:1px solid #aaa;padding:1rem;margin:1rem 0}</style>
-</head>
-<body>
-<h1>Campus Notes</h1>
-<p><?= $message ?></p>
-<?php if (!isset($_SESSION['user_id'])): ?>
-<h2>Register or sign in</h2>
-<form method="post">
-  <label>Email <input name="email" type="email" required></label>
-  <label>Password <input name="password" type="password" required></label>
-  <label>Role <select name="role"><option>student</option><option>admin</option></select></label>
-  <button name="action" value="register">Register</button>
-  <button name="action" value="login">Sign in</button>
-</form>
-<?php else: ?>
-<p>User ID: <?= $_SESSION['user_id'] ?> | Role: <?= $_SESSION['role'] ?> | <a href="?logout=1">Log out</a></p>
-<?php if ($editing): ?>
-<h2>Edit note</h2>
-<form method="post">
-  <input type="hidden" name="id" value="<?= $editing['id'] ?>">
-  <label>Title <input name="title" value="<?= $editing['title'] ?>" required></label>
-  <label>Body <textarea name="body" required><?= $editing['body'] ?></textarea></label>
-  <button name="action" value="update">Update</button>
-  <a href="/">Cancel</a>
-</form>
-<?php endif; ?>
-<h2>Create a note</h2>
-<form method="post">
-  <label>Owner ID <input name="user_id" value="<?= $_SESSION['user_id'] ?>"></label>
-  <label>Title <input name="title" required></label>
-  <label>Body <textarea name="body" required></textarea></label>
-  <button name="action" value="save">Save</button>
-</form>
-<h2>Notes</h2>
-<?php foreach ($notes as $note): ?>
-<article><h3><?= $note['title'] ?></h3><p><?= $note['body'] ?></p>
-<small>Owner: <?= $note['user_id'] ?></small>
-<a href="?edit=<?= $note['id'] ?>">Edit</a>
-<a href="?delete=<?= $note['id'] ?>">Delete</a></article>
-<?php endforeach; ?>
-<?php endif; ?>
-</body></html>
+
+require __DIR__ . '/templates/home.php';
